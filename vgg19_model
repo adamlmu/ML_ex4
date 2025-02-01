@@ -1,0 +1,229 @@
+import torch
+import torchvision
+import matplotlib.pyplot as plt
+import torch.nn as nn
+import os
+import cv2
+import numpy as np
+from PIL import Image
+from torch import optim
+from torchvision import models, transforms
+from torch.utils.data import Dataset, DataLoader
+from scipy.io import loadmat
+from tqdm import tqdm
+from torch.utils.data import random_split
+
+#Define paths
+dataset_path = "C:/Users/adaml/Dropbox/adammu/Machine Learning course/Exercise 4/Data/102flowers"
+image_dir = os.path.join(dataset_path, "jpg")  #Folder containing images
+labels_path = os.path.join(dataset_path, "imagelabels.mat")  #Path to .mat labels
+
+#Load labels
+data = loadmat(labels_path)
+labels = data["labels"][0] - 1
+
+#Get sorted filenames
+image_filenames = sorted([f for f in os.listdir(image_dir) if f.endswith(".jpg")])
+assert len(image_filenames) == len(labels), "Mismatch between images and labels"
+
+#Define image transformations
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),  #Resize
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # Standard normalization
+])
+
+class FlowersDataset(Dataset):
+    def __init__(self, image_dir, image_filenames, labels, transform=None):
+        self.image_dir = image_dir
+        self.image_filenames = image_filenames
+        self.labels = labels
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.image_filenames)
+
+    def __getitem__(self, idx):
+        img_path = os.path.join(self.image_dir, self.image_filenames[idx])
+        image = cv2.imread(img_path)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)  # Convert to RGB
+
+        # Convert numpy array to PIL Image
+        image = Image.fromarray(image)
+
+        label = self.labels[idx]
+
+        if self.transform:
+            image = self.transform(image)
+
+        return image, label
+
+#Create dataset
+dataset = FlowersDataset(image_dir, image_filenames, labels, transform=transform)
+
+#Define the split proportions
+train_size = int(0.5 * len(dataset))  # 50% for training
+val_size = int(0.25 * len(dataset))   # 25% for validation
+test_size = len(dataset) - train_size - val_size  # Remaining 25% for testing
+
+#Split the dataset
+train_dataset, val_dataset, test_dataset = random_split(dataset, [train_size, val_size, test_size])
+train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
+test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+
+images, labels = next(iter(train_loader))
+print(f"Training batch shape: {images.shape}, Labels: {labels[:5]}")
+images, labels = next(iter(test_loader))
+print(f"Training batch shape: {images.shape}, Labels: {labels[:5]}")
+images, labels = next(iter(val_loader))
+print(f"Training batch shape: {images.shape}, Labels: {labels[:5]}")
+
+#Load the pre-trained VGG19 model
+vgg19 = models.vgg19(weights=models.VGG19_Weights.IMAGENET1K_V1)
+
+#Freeze all layers except the last few
+for param in vgg19.parameters():
+    param.requires_grad = False
+
+#Only train the final classifier layer
+for param in vgg19.classifier[6].parameters():
+    param.requires_grad = True
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+vgg19 = vgg19.to(device)
+
+# Define the loss function and optimizer
+criterion = nn.CrossEntropyLoss()
+optimizer = optim.Adam(vgg19.classifier[6].parameters(), lr=0.001)
+
+#Dropout
+vgg19.classifier[5] = nn.Dropout(p=0.5)
+
+#Lists to store loss and accuracy
+train_losses = []
+train_accuracies = []
+val_losses = []
+val_accuracies = []
+test_losses = []
+test_accuracies = []
+
+
+#Training Loop
+num_epochs = 10
+for epoch in range(num_epochs):
+    vgg19.train()
+    running_loss = 0.0
+    correct = 0
+    total = 0
+
+    for inputs, labels in tqdm(train_loader, desc=f"Epoch {epoch + 1}/{num_epochs}", ncols=100):
+        inputs, labels = inputs.to(device), labels.to(device)
+
+        #Zero the parameter gradients
+        optimizer.zero_grad()
+
+        #Forward pass
+        outputs = vgg19(inputs)
+
+        #Calculate loss
+        loss = criterion(outputs, labels)
+
+        #Backward pass and optimize
+        loss.backward()
+        optimizer.step()
+
+        #Track loss and accuracy
+        running_loss += loss.item()
+        _, predicted = torch.max(outputs, 1)
+        total += labels.size(0)
+        correct += (predicted == labels).sum().item()
+
+    epoch_loss = running_loss / len(train_loader)
+    epoch_accuracy = 100 * correct / total
+
+    #Append training metrics
+    train_losses.append(epoch_loss)
+    train_accuracies.append(epoch_accuracy)
+
+    print(f"Train Loss: {epoch_loss:.4f}, Train Accuracy: {epoch_accuracy:.2f}%")
+
+    #Validation Phase
+    vgg19.eval()  # Set model to evaluation mode
+    val_loss = 0.0
+    val_correct = 0
+    val_total = 0
+    with torch.no_grad():  # No gradients needed for validation
+        for inputs, labels in val_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+
+            outputs = vgg19(inputs)
+            loss = criterion(outputs, labels)
+            val_loss += loss.item()
+
+            _, predicted = torch.max(outputs, 1)
+            val_total += labels.size(0)
+            val_correct += (predicted == labels).sum().item()
+
+    val_loss = val_loss / len(val_loader)
+    val_accuracy = 100 * val_correct / val_total
+
+    #Append validation metrics
+    val_losses.append(val_loss)
+    val_accuracies.append(val_accuracy)
+
+    print(f"Val Loss: {val_loss:.4f}, Val Accuracy: {val_accuracy:.2f}%")
+
+    #Test Phase
+    test_loss = 0.0
+    test_correct = 0
+    test_total = 0
+    with torch.no_grad():  # No gradients for testing
+        for inputs, labels in test_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+
+            outputs = vgg19(inputs)
+            loss = criterion(outputs, labels)
+            test_loss += loss.item()
+
+            _, predicted = torch.max(outputs, 1)
+            test_total += labels.size(0)
+            test_correct += (predicted == labels).sum().item()
+
+    test_loss = test_loss / len(test_loader)
+    test_accuracy = 100 * test_correct / test_total
+
+    #Append test metrics
+    test_losses.append(test_loss)
+    test_accuracies.append(test_accuracy)
+
+    print(f"Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.2f}%")
+
+epochs = range(1, num_epochs + 1)
+plt.figure(figsize =(12,5))
+
+# Plot Accuracy Graph
+plt.subplot(1, 2, 2)
+plt.plot(epochs, train_accuracies, label="Training Accuracy", marker="o")
+plt.plot(epochs, val_accuracies, label="Validation Accuracy", marker="o")
+plt.plot(epochs, test_accuracies, label="Test Accuracy", marker="o")
+plt.xlabel("Epochs")
+plt.ylabel("Accuracy")
+plt.title("Training, Validation & Test Accuracy Over Epochs")
+plt.legend()
+plt.grid()
+
+# Plot Loss Graph
+plt.subplot(1, 2, 1)
+plt.plot(epochs, train_losses, label="Training Loss", marker="o")
+plt.plot(epochs, val_losses, label="Validation Loss", marker="o")
+plt.plot(epochs, test_losses, label="Test Loss", marker="o")
+plt.xlabel("Epochs")
+plt.ylabel("Cross-Entropy Loss")
+plt.title("Training, Validation & Test Loss Over Epochs")
+plt.legend()
+plt.grid()
+
+plt.tight_layout()
+plt.show()
+
