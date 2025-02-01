@@ -165,4 +165,5 @@ def train_yolov5_on_split(split_id, epochs=3, batch=32, device="mps"):
 
 
 if __name__ == "__main__":
-    train_yolov5_on_split(1, epochs=3, batch=32)
+    for sid in [1, 2]:
+        train_yolov5_on_split(split_id=sid, epochs=10, batch=32)
