@@ -4,12 +4,12 @@ import shutil
 import glob
 import tarfile
 import requests
-from PIL import Image
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms, models
 
